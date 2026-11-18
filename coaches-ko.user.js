@@ -1,13 +1,20 @@
 // ==UserScript==
 // @name         Chess.com 매그너스 한국어 말풍선
 // @namespace    local.chess-coach-ko
-// @version      1.1.3
+// @version      1.2.0
 // @updateURL    https://raw.githubusercontent.com/CurlyR/chess-coach-ko/main/coaches-ko.meta.js
 // @downloadURL  https://raw.githubusercontent.com/CurlyR/chess-coach-ko/main/coaches-ko.user.js
 // @description  매그너스·히카루 한국어 말풍선 및 미번역 진단. 로컬 사전 사용.
 // @match        https://www.chess.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
 // @noframes
 // ==/UserScript==
 (() => {
@@ -16,8 +23,118 @@
   const dictionaries = Object.fromEntries(Object.entries(packages).map(([name,p])=>[name,new Map(p.entries.map(([en,ko,reviewed])=>[en,{ko,reviewed}]))]));
   const blocked = Object.fromEntries(Object.entries(packages).map(([name,p])=>[name,new Map(p.blocked)]));
   const normalize = s => s.normalize('NFC').replace(/\*/g,'').replace(/[‘’]/g,"'").replace(/[“”]/g,'"').replace(/\s+/g,' ').trim();
+  function createCoachReporter(version) {
+  const prefix='coach-ko-event:', memory=new Map(), states=new WeakMap(), streams=new Map();
+  const available=typeof GM_getValue==='function' && typeof GM_listValues==='function';
+  const get=(k,d)=>available?GM_getValue(k,d):(memory.has(k)?memory.get(k):d);
+  const put=(k,v)=>available?GM_setValue(k,v):memory.set(k,v);
+  const del=k=>available?GM_deleteValue(k):memory.delete(k);
+  const keys=()=>available?GM_listValues():[...memory.keys()];
+  const list=()=>keys().filter(k=>k.startsWith(prefix)).map(k=>get(k,null)).filter(Boolean);
+  const clean=s=>String(s||'').slice(0,2000);
+  let sending=false,lastError='',retryAt=0,failures=0;
+  const validConfig=c=>c && /^https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec$/.test(c.endpoint) && /^[a-zA-Z0-9_-]{32,100}$/.test(c.token);
+  function context(el,coach) {
+    const path=location.pathname;
+    const page=/^\/analysis/.test(path)?'game_review':/^\/puzzles/.test(path)?'puzzle':/^\/game\//.test(path)?'game_end_or_replay':/^\/play/.test(path)?'play':'other';
+    const move=new URL(location.href).searchParams.get('move');
+    return {page,coach:coach||'Unknown',coachEvidence:coach==='Unknown'?'canvas_identity_unavailable':coach?'avatar_image':'unavailable',moveHint:move!==null&&/^\d{1,4}$/.test(move)?'URL move='+move:'unavailable',previous:null,next:null};
+  }
+  function save(event) {
+    const existing=get(prefix+event.id,null);
+    if(!existing) {
+      const all=list();
+      if(all.length>=500){
+        const sent=all.filter(e=>e.sentAt).sort((a,b)=>a.occurredAt.localeCompare(b.occurredAt));
+        if(!sent.length){lastError='저장 공간 가득 참';return false;}
+        del(prefix+sent[0].id);
+      }
+    }
+    put(prefix+event.id,event);return true;
+  }
+  function make(source,translation,reason,kind,c) {
+    const event={id:crypto.randomUUID(),occurredAt:new Date().toISOString(),kind,source:clean(source),translation:clean(translation),reason:String(reason||'').slice(0,250),version,context:c};
+    return save(event)?event:null;
+  }
+  function observe(el,source,coach,entry,reason) {
+    if(!source || !el.getClientRects().length)return;
+    const route=location.pathname+location.search;
+    let state=states.get(el);
+    if(!state || state.source!==source || state.coach!==coach || state.route!==route){
+      state={source,coach,route,since:Date.now(),committed:false};states.set(el,state);return;
+    }
+    if(state.committed || Date.now()-state.since<1200)return;
+    state.committed=true;
+    const streamKey=location.pathname+'|'+(el.matches('.move-feedback-speech-text-tw')?'review':'bubble');
+    const prior=streams.get(streamKey);
+    // A sentence repeated by a DOM remount is not another occurrence.
+    if(prior && prior.source===source && prior.route===route && prior.coach===coach && Date.now()-prior.at<10000)return;
+    const c=context(el,coach);
+    if(prior && Date.now()-prior.at<120000){
+      c.previous=prior.source;
+      if(prior.eventId){const previous=get(prefix+prior.eventId,null);if(previous&&!previous.sentAt){previous.context.next=clean(source);save(previous);}}
+    }
+    let event=null;
+    if(!entry && /[a-zA-Z]{3}/.test(source) && source.length>=10 && source.length<=2000)event=make(source,'',reason,'untranslated',c);
+    streams.set(streamKey,{source,coach,route,at:Date.now(),eventId:event?.id});
+    state.context=c;
+  }
+  function report(el,source,entry,coach) {
+    const state=states.get(el),c=state?.context?{...state.context}:context(el,coach);
+    return make(source,entry?.ko||'','user_reported_translation_or_display','translation_report',c);
+  }
+  function send() {
+    const config=get('coach-ko-reporter-config',null);
+    if(sending || Date.now()<retryAt || !validConfig(config) || !config.enabled || typeof GM_xmlhttpRequest!=='function')return;
+    const batch=list().filter(e=>!e.sentAt && Date.now()-Date.parse(e.occurredAt)>=5000).slice(0,20);
+    while(batch.length>1 && JSON.stringify(batch).length>90000)batch.pop();
+    if(!batch.length)return;
+    sending=true;
+    const fail=reason=>{sending=false;lastError=reason;failures++;retryAt=Date.now()+Math.min(3600000,30000*2**Math.min(failures,7));};
+    // Only these fields leave the browser. No URL, account, cookies or raw DOM.
+    const events=batch.map(({id,occurredAt,kind,source,translation,reason,version,context})=>({id,occurredAt,kind,source,translation,reason,version,context}));
+    try { GM_xmlhttpRequest({method:'POST',url:config.endpoint,anonymous:true,timeout:25000,headers:{'Content-Type':'text/plain;charset=UTF-8'},data:JSON.stringify({schema:1,token:config.token,events}),
+      onload(response){
+        let reply;try{reply=JSON.parse(response.responseText);}catch(_){fail('응답 확인 실패');return;}
+        if(response.status!==200 || reply.ok!==true || !Array.isArray(reply.accepted)){fail('전송 실패: '+String(reply.error||response.status).slice(0,40));return;}
+        const accepted=new Set(reply.accepted);
+        for(const event of batch)if(accepted.has(event.id)){const current=get(prefix+event.id,null);if(current){current.sentAt=new Date().toISOString();put(prefix+event.id,current);}}
+        sending=false;failures=0;retryAt=0;lastError=accepted.size<batch.length?'일부 기록 미수신':'';
+      },onerror(){fail('네트워크 오류');},ontimeout(){fail('전송 시간 초과');},onabort(){fail('전송 취소');}}); } catch(_) {fail('전송 권한 확인 필요');}
+  }
+  function download(){const url=URL.createObjectURL(new Blob([JSON.stringify({schema:1,version,records:list()},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='coach-ko-context.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  function panel() {
+    if(document.getElementById('coach-ko-report-panel'))return;
+    const dialog=document.createElement('dialog');dialog.id='coach-ko-report-panel';dialog.style.cssText='max-width:440px;border:1px solid #888;border-radius:10px;padding:20px;background:#262421;color:white;font:14px/1.6 sans-serif';
+    const title=document.createElement('strong');title.textContent='코치 오류 기록';dialog.append(title);
+    const info=document.createElement('p');const all=list(),cfg=get('coach-ko-reporter-config',null);
+    info.textContent='전송 대기 '+all.filter(e=>!e.sentAt).length+'건 · 최근 전송 완료 '+all.filter(e=>e.sentAt).length+'건. '+(cfg?.enabled?'자동 전송 켜짐.':'자동 전송 꺼짐 또는 미연결. ')+(lastError||'');dialog.append(info);
+    const guide=document.createElement('p');guide.textContent='원문·번역·시각·화면·코치·전후 문구·수 번호 단서를 기록합니다. 비공개 시트의 연결 안내에서 이 브라우저를 연결하세요. 미번역은 자동 수집하며, 오역·표시 문제는 말풍선의 신고를 누르세요.';dialog.append(guide);
+    const add=(label,fn)=>{const b=document.createElement('button');b.textContent=label;b.style.cssText='margin:4px;padding:6px 10px';b.onclick=fn;dialog.append(b);};
+    add('기록 다운로드',download);
+    if(validConfig(cfg)){add(cfg.enabled?'자동 전송 끄기':'자동 전송 켜기',()=>{put('coach-ko-reporter-config',{...cfg,enabled:!cfg.enabled});dialog.close();send();});add('지금 재시도',()=>{retryAt=0;send();dialog.close();});}
+    add('닫기',()=>dialog.close());dialog.addEventListener('close',()=>dialog.remove());document.body.append(dialog);dialog.showModal();
+  }
+  function connect() {
+    if(!location.hash.startsWith('#coach-ko-connect='))return;
+    let config;
+    try{config=JSON.parse(atob(location.hash.slice('#coach-ko-connect='.length)));}catch(_){return;}
+    if(!validConfig(config))return;
+    history.replaceState(null,'',location.pathname+location.search);
+    if(!available){alert('Tampermonkey 스크립트를 먼저 최신 버전으로 업데이트해주세요.');return;}
+    if(!confirm('코치 오류를 본인의 비공개 Google 시트로 자동 전송할까요?\n원문·번역·시각·화면·코치·전후 문구·수 번호 단서를 전송합니다. 계정 정보·대국 URL·쿠키는 전송하지 않습니다.\n수신처: '+config.endpoint))return;
+    put('coach-ko-reporter-config',{endpoint:config.endpoint,token:config.token,enabled:true});
+    make('Connection test','','browser_connected','connection_test',{page:'setup',coach:'Unknown',coachEvidence:'unavailable',moveHint:'unavailable',previous:null,next:null});
+    alert('자동 전송을 연결했습니다. 잠시 후 비공개 시트에 연결 시험 기록이 추가됩니다.');
+  }
+  connect();window.addEventListener('hashchange',connect);
+  if(typeof GM_registerMenuCommand==='function')GM_registerMenuCommand('코치 오류 기록 · 자동 전송 설정',panel);
+  setInterval(send,30000);
+  return {observe,report,panel,download,list,send,status(){const cfg=get('coach-ko-reporter-config',null),waiting=list().filter(e=>!e.sentAt).length;return lastError?'전송 확인':cfg?.enabled?'자동 기록 '+waiting:'기록 '+waiting;}};
+}
+
+  const reporting=createCoachReporter('1.2.0');
   const records = new Map();
-  const unresolved = new Map(), pending = new WeakMap();
   let enabled = true, scheduled = false;
   const css = document.createElement('style');
   css.textContent = '.mko-source-hidden{display:none!important}.mko-translation{display:block;white-space:normal;line-height:1.55;overflow-wrap:anywhere;font:inherit;color:inherit;text-align:inherit}.mko-toggle{position:fixed;right:10px;bottom:10px;z-index:99999;max-width:calc(100vw - 20px);border:1px solid #555;border-radius:5px;background:#292929;color:#bbb;padding:4px 7px;font:10px/13px sans-serif;cursor:pointer;opacity:.65;transition:opacity .15s}.mko-toggle:hover,.mko-toggle:focus-visible{opacity:1;color:#fff}.mko-original{font-size:11px;opacity:.8;margin-left:8px;background:none;color:inherit;border:0;text-decoration:underline;cursor:pointer}';
@@ -28,9 +145,9 @@
   toggle.title = '매그너스·히카루 한국어 · 검수 전 기계번역 포함. 클릭하면 원문으로 전환합니다.';
   document.body.append(toggle);
   const diagnostics=document.createElement('button');diagnostics.type='button';diagnostics.className='mko-toggle';diagnostics.style.bottom='37px';diagnostics.textContent='미번역 저장 (0)';
-  diagnostics.title='이 탭에서 영어로 남은 코치 문구와 사유만 JSON으로 저장합니다. 외부로 전송하지 않습니다.';
+  diagnostics.title='오류 기록과 비공개 시트 자동 전송 설정';
   document.body.append(diagnostics);
-  diagnostics.addEventListener('click',()=>{const url=URL.createObjectURL(new Blob([JSON.stringify({version:'1.1.3',records:[...unresolved.values()]},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='coach-ko-untranslated.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
+  diagnostics.addEventListener('click',()=>reporting.panel());
   toggle.addEventListener('click',()=>{enabled=!enabled; refresh();});
   const active = () => /^\/(analysis|puzzles|play)(\/|$)/.test(location.pathname) || /^\/game\/(live|daily)\//.test(location.pathname);
   function selectedCoach() {
@@ -63,15 +180,6 @@
     if(entries.every(entry=>entry?.reviewed))return {entry:{ko:entries.map(entry=>entry.ko).join(' '),reviewed:true}};
     return exact;
   }
-  function note(el,source,coach,reason) {
-    if(!/[a-zA-Z]{3}/.test(source)||source.length<10||source.length>2000)return;
-    const before=pending.get(el);
-    if(!before||before.source!==source){pending.set(el,{source,since:Date.now()});return;}
-    if(Date.now()-before.since<1000)return;
-    const key=coach+'|'+source;
-    if(!unresolved.has(key))unresolved.set(key,{coach,source,reason});
-    if(unresolved.size>200)unresolved.delete(unresolved.keys().next().value);
-  }
   function reset(el,r) { el.classList.remove('mko-source-hidden');r.view.remove();records.delete(el); }
   function renderText(target,text) {
     // Never interpret translations as HTML.
@@ -93,23 +201,26 @@
       // bubble's white background, padding, width and pointer alignment.
       const candidates=[...document.querySelectorAll('.move-feedback-speech-text-component .move-feedback-speech-text-tw, .bot-speech-content-botMessage .typewriter-text-tw')];
       for(const el of candidates) {
-        if(records.has(el)) {matched++;continue;}
         const source=normalize(el.textContent),result=lookup(source,coach),entry=result.entry;
-        if(!entry) {missed++;note(el,source,coach,result.reason);continue;}
+        reporting.observe(el,source,coach,entry,result.reason);
+        if(records.has(el)) {matched++;continue;}
+        if(!entry) {missed++;continue;}
         const view=document.createElement('span');view.className='mko-translation';view.lang='ko';
         const text=document.createElement('span');renderText(text,entry.ko);view.append(text);
         const original=document.createElement('button');original.type='button';original.className='mko-original';original.textContent='원문';
         original.title=entry.reviewed?'원문·번역 대조 검수됨':'기계번역 초안 · 의미 오류가 남을 수 있습니다';
         let showOriginal=false;
         original.addEventListener('click',()=>{showOriginal=!showOriginal;text.replaceChildren();renderText(text,showOriginal?el.textContent:entry.ko);original.textContent=showOriginal?'한국어':'원문';});
-        view.append(original);el.after(view);el.classList.add('mko-source-hidden');records.set(el,{source,view,coach});matched++;
+        const report=document.createElement('button');report.type='button';report.className='mko-original';report.textContent='신고';report.title='번역 또는 표시 오류를 상황과 함께 기록합니다';
+        report.addEventListener('click',()=>{if(reporting.report(el,source,entry,coach)){report.textContent='기록됨';report.disabled=true;}});
+        view.append(original,report);el.after(view);el.classList.add('mko-source-hidden');records.set(el,{source,view,coach});matched++;
       }
     }
     const status=!allowed?'코치 말풍선 대기':!enabled?'원문 보기':matched?'한국어 표시 중':'일치 문구 대기';
     const caption=(coach==='Hikaru'?'히카루':coach==='Magnus'?'매그너스':'코치')+' KO · '+(!allowed?'대기':!enabled?'끔':matched?'켬':'대기')+(missed?' · EN '+missed:'');
     if(toggle.textContent!==caption) toggle.textContent=caption;
-    toggle.title='v1.1.3 · '+status+' · 클릭하면 한국어 표시를 켜거나 끕니다.';
-    const diagnosticText='미번역 저장 ('+unresolved.size+')';
+    toggle.title='v1.2.0 · '+status+' · 클릭하면 한국어 표시를 켜거나 끕니다.';
+    const diagnosticText=reporting.status();
     if(diagnostics.textContent!==diagnosticText)diagnostics.textContent=diagnosticText;
     toggle.setAttribute('aria-pressed',String(enabled));
   }
