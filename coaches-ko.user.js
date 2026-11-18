@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess.com 매그너스 한국어 말풍선
 // @namespace    local.chess-coach-ko
-// @version      1.2.0
+// @version      1.2.1
 // @updateURL    https://raw.githubusercontent.com/CurlyR/chess-coach-ko/main/coaches-ko.meta.js
 // @downloadURL  https://raw.githubusercontent.com/CurlyR/chess-coach-ko/main/coaches-ko.user.js
 // @description  매그너스·히카루 한국어 말풍선 및 미번역 진단. 로컬 사전 사용.
@@ -57,7 +57,9 @@
     return save(event)?event:null;
   }
   function observe(el,source,coach,entry,reason) {
-    if(!source || !el.getClientRects().length)return;
+    // Translated originals are intentionally hidden; their visible parent still
+    // supplies context for the sentence before/after an untranslated message.
+    if(!source || !(el.getClientRects().length || (el.classList.contains('mko-source-hidden') && el.parentElement?.getClientRects().length)))return;
     const route=location.pathname+location.search;
     let state=states.get(el);
     if(!state || state.source!==source || state.coach!==coach || state.route!==route){
@@ -133,7 +135,7 @@
   return {observe,report,panel,download,list,send,status(){const cfg=get('coach-ko-reporter-config',null),waiting=list().filter(e=>!e.sentAt).length;return lastError?'전송 확인':cfg?.enabled?'자동 기록 '+waiting:'기록 '+waiting;}};
 }
 
-  const reporting=createCoachReporter('1.2.0');
+  const reporting=createCoachReporter('1.2.1');
   const records = new Map();
   let enabled = true, scheduled = false;
   const css = document.createElement('style');
@@ -219,7 +221,7 @@
     const status=!allowed?'코치 말풍선 대기':!enabled?'원문 보기':matched?'한국어 표시 중':'일치 문구 대기';
     const caption=(coach==='Hikaru'?'히카루':coach==='Magnus'?'매그너스':'코치')+' KO · '+(!allowed?'대기':!enabled?'끔':matched?'켬':'대기')+(missed?' · EN '+missed:'');
     if(toggle.textContent!==caption) toggle.textContent=caption;
-    toggle.title='v1.2.0 · '+status+' · 클릭하면 한국어 표시를 켜거나 끕니다.';
+    toggle.title='v1.2.1 · '+status+' · 클릭하면 한국어 표시를 켜거나 끕니다.';
     const diagnosticText=reporting.status();
     if(diagnostics.textContent!==diagnosticText)diagnostics.textContent=diagnosticText;
     toggle.setAttribute('aria-pressed',String(enabled));
