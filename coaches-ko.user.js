@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chess.com 매그너스 한국어 말풍선
 // @namespace    local.chess-coach-ko
-// @version      1.2.1
+// @version      1.2.2
 // @updateURL    https://raw.githubusercontent.com/CurlyR/chess-coach-ko/main/coaches-ko.meta.js
 // @downloadURL  https://raw.githubusercontent.com/CurlyR/chess-coach-ko/main/coaches-ko.user.js
 // @description  매그너스·히카루 한국어 말풍선 및 미번역 진단. 로컬 사전 사용.
@@ -34,11 +34,11 @@
   const clean=s=>String(s||'').slice(0,2000);
   let sending=false,lastError='',retryAt=0,failures=0;
   const validConfig=c=>c && /^https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec$/.test(c.endpoint) && /^[a-zA-Z0-9_-]{32,100}$/.test(c.token);
-  function context(el,coach) {
+  function context(el,coach,evidence) {
     const path=location.pathname;
     const page=/^\/analysis/.test(path)?'game_review':/^\/puzzles/.test(path)?'puzzle':/^\/game\//.test(path)?'game_end_or_replay':/^\/play/.test(path)?'play':'other';
     const move=new URL(location.href).searchParams.get('move');
-    return {page,coach:coach||'Unknown',coachEvidence:coach==='Unknown'?'canvas_identity_unavailable':coach?'avatar_image':'unavailable',moveHint:move!==null&&/^\d{1,4}$/.test(move)?'URL move='+move:'unavailable',previous:null,next:null};
+    return {page,coach:coach||'Unknown',coachEvidence:evidence||(coach==='Unknown'?'canvas_identity_unavailable':coach?'avatar_image':'unavailable'),moveHint:move!==null&&/^\d{1,4}$/.test(move)?'URL move='+move:'unavailable',previous:null,next:null};
   }
   function save(event) {
     const existing=get(prefix+event.id,null);
@@ -56,7 +56,7 @@
     const event={id:crypto.randomUUID(),occurredAt:new Date().toISOString(),kind,source:clean(source),translation:clean(translation),reason:String(reason||'').slice(0,250),version,context:c};
     return save(event)?event:null;
   }
-  function observe(el,source,coach,entry,reason) {
+  function observe(el,source,coach,entry,reason,evidence) {
     // Translated originals are intentionally hidden; their visible parent still
     // supplies context for the sentence before/after an untranslated message.
     if(!source || !(el.getClientRects().length || (el.classList.contains('mko-source-hidden') && el.parentElement?.getClientRects().length)))return;
@@ -71,7 +71,7 @@
     const prior=streams.get(streamKey);
     // A sentence repeated by a DOM remount is not another occurrence.
     if(prior && prior.source===source && prior.route===route && prior.coach===coach && Date.now()-prior.at<10000)return;
-    const c=context(el,coach);
+    const c=context(el,coach,evidence);
     if(prior && Date.now()-prior.at<120000){
       c.previous=prior.source;
       if(prior.eventId){const previous=get(prefix+prior.eventId,null);if(previous&&!previous.sentAt){previous.context.next=clean(source);save(previous);}}
@@ -81,8 +81,8 @@
     streams.set(streamKey,{source,coach,route,at:Date.now(),eventId:event?.id});
     state.context=c;
   }
-  function report(el,source,entry,coach) {
-    const state=states.get(el),c=state?.context?{...state.context}:context(el,coach);
+  function report(el,source,entry,coach,evidence) {
+    const state=states.get(el),c=state?.context && state.source===source && state.coach===coach?{...state.context}:context(el,coach,evidence);
     return make(source,entry?.ko||'','user_reported_translation_or_display','translation_report',c);
   }
   function send() {
@@ -135,7 +135,7 @@
   return {observe,report,panel,download,list,send,status(){const cfg=get('coach-ko-reporter-config',null),waiting=list().filter(e=>!e.sentAt).length;return lastError?'전송 확인':cfg?.enabled?'자동 기록 '+waiting:'기록 '+waiting;}};
 }
 
-  const reporting=createCoachReporter('1.2.1');
+  const reporting=createCoachReporter('1.2.2');
   const records = new Map();
   let enabled = true, scheduled = false;
   const css = document.createElement('style');
@@ -152,15 +152,39 @@
   diagnostics.addEventListener('click',()=>reporting.panel());
   toggle.addEventListener('click',()=>{enabled=!enabled; refresh();});
   const active = () => /^\/(analysis|puzzles|play)(\/|$)/.test(location.pathname) || /^\/game\/(live|daily)\//.test(location.pathname);
+  let coachEvidence='unavailable';
   function selectedCoach() {
+    coachEvidence='unavailable';
     const images=[...document.querySelectorAll('img.bot-speech-avatar-and-wrapper-botImage')].filter(img=>img.getClientRects().length);
     if(images.length) {
-      for(const name of ['Magnus','Hikaru']) if(images.some(img=>img.alt.toLowerCase()===name.toLowerCase() || new RegExp('/coach'+name.toLowerCase()+'\\.png(?:\\?|$)').test(img.src))) return name;
+      for(const name of ['Magnus','Hikaru']) if(images.some(img=>img.alt.toLowerCase()===name.toLowerCase() || new RegExp('/coach'+name.toLowerCase()+'\\.png(?:\\?|$)').test(img.src))) {coachEvidence='avatar_image';return name;}
       return null;
     }
-    // Canvas avatars expose no coach identity. Only exact Magnus-dictionary
-    // matches are eligible; the UI explicitly labels this as dictionary mode.
-    return [...document.querySelectorAll('.bot-speech-avatar-and-wrapper-botImage canvas')].some(canvas=>canvas.getClientRects().length)?'Unknown':null;
+    const animated=[...document.querySelectorAll('.bot-speech-avatar-and-wrapper-botImage canvas')].some(canvas=>canvas.getClientRects().length);
+    if(!animated)return null;
+    // The animated avatar has no name in its DOM. Chess.com's resource cache
+    // contains the committed currentCoach (the selection dialog is only a
+    // pending preview, so never use its highlighted option as confirmation).
+    // Only accept a resource refreshed during THIS page visit. Old account
+    // caches and historical coach selections must not identify today's coach.
+    try {
+      const fresh=[];
+      for(let i=0;i<localStorage.length;i++) {
+        const key=localStorage.key(i);
+        if(!/^Resource\.[^.]+\.coachesService\.currentCoach$/.test(key||''))continue;
+        let resource;try{resource=JSON.parse(localStorage.getItem(key));}catch(_){continue;}
+        if(!Number.isFinite(resource?.timestamp) || resource.timestamp<performance.timeOrigin || resource.timestamp>Date.now()+5000)continue;
+        const current=resource.data?.currentCoach;
+        if(!current || typeof current.name!=='string')continue;
+        fresh.push(current.name);
+      }
+      if(fresh.length===1) {
+        coachEvidence='current_coach_resource';
+        return ['Magnus','Hikaru'].includes(fresh[0])?fresh[0]:null;
+      }
+    } catch(_) { /* Storage can be disabled; keep the conservative fallback. */ }
+    coachEvidence='canvas_identity_unavailable';
+    return 'Unknown';
   }
   function exactLookup(source,coach) {
     const names=coach==='Unknown'?['Magnus','Hikaru']:[coach];
@@ -204,7 +228,7 @@
       const candidates=[...document.querySelectorAll('.move-feedback-speech-text-component .move-feedback-speech-text-tw, .bot-speech-content-botMessage .typewriter-text-tw')];
       for(const el of candidates) {
         const source=normalize(el.textContent),result=lookup(source,coach),entry=result.entry;
-        reporting.observe(el,source,coach,entry,result.reason);
+        reporting.observe(el,source,coach,entry,result.reason,coachEvidence);
         if(records.has(el)) {matched++;continue;}
         if(!entry) {missed++;continue;}
         const view=document.createElement('span');view.className='mko-translation';view.lang='ko';
@@ -214,14 +238,15 @@
         let showOriginal=false;
         original.addEventListener('click',()=>{showOriginal=!showOriginal;text.replaceChildren();renderText(text,showOriginal?el.textContent:entry.ko);original.textContent=showOriginal?'한국어':'원문';});
         const report=document.createElement('button');report.type='button';report.className='mko-original';report.textContent='신고';report.title='번역 또는 표시 오류를 상황과 함께 기록합니다';
-        report.addEventListener('click',()=>{if(reporting.report(el,source,entry,coach)){report.textContent='기록됨';report.disabled=true;}});
+        const evidence=coachEvidence;
+        report.addEventListener('click',()=>{if(reporting.report(el,source,entry,coach,evidence)){report.textContent='기록됨';report.disabled=true;}});
         view.append(original,report);el.after(view);el.classList.add('mko-source-hidden');records.set(el,{source,view,coach});matched++;
       }
     }
     const status=!allowed?'코치 말풍선 대기':!enabled?'원문 보기':matched?'한국어 표시 중':'일치 문구 대기';
     const caption=(coach==='Hikaru'?'히카루':coach==='Magnus'?'매그너스':'코치')+' KO · '+(!allowed?'대기':!enabled?'끔':matched?'켬':'대기')+(missed?' · EN '+missed:'');
     if(toggle.textContent!==caption) toggle.textContent=caption;
-    toggle.title='v1.2.1 · '+status+' · 클릭하면 한국어 표시를 켜거나 끕니다.';
+    toggle.title='v1.2.2 · '+status+' · 클릭하면 한국어 표시를 켜거나 끕니다.';
     const diagnosticText=reporting.status();
     if(diagnostics.textContent!==diagnosticText)diagnostics.textContent=diagnosticText;
     toggle.setAttribute('aria-pressed',String(enabled));
