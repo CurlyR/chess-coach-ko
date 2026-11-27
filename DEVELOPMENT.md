@@ -1,10 +1,10 @@
-# 개발 소스 인수인계 (v1.3.11)
+# 개발 소스 인수인계 (v1.3.12)
 
 집에서 개발할 수 있는 원본 소스와 검수 배치, 재현 검사입니다. 실행 배포 파일은 저장소 루트의 coaches-ko.user.js이며, 이 소스 묶음은 별도로 압축을 풀어 사용합니다.
 
 ## 시작
 
-1. 이 저장소의 chess-coach-ko-source-v1.3.11.zip을 내려받아 빈 작업 폴더에 풉니다.
+1. 이 저장소의 chess-coach-ko-source-v1.3.12.zip을 내려받아 빈 작업 폴더에 풉니다.
 2. Node.js와 npm을 준비합니다. 검수 배치 재생성이나 미리보기 서버에는 Python 3도 필요합니다.
 3. 압축을 푼 폴더에서 아래 명령을 실행합니다.
 
@@ -39,21 +39,24 @@ received-*.json과 observations.json이라는 이름은 기존 빌드 호환을 
 
 소스를 수정한 다음에는 이 압축파일도 새 버전으로 갱신하거나, 압축을 푼 소스 트리를 Git으로 관리해 주세요. 저장소 루트의 배포 파일만 고치면 다음 원본 빌드에서 변경이 사라질 수 있습니다.
 
-현재 소스는 공개 v1.3.11 사용자 스크립트와 동일한 바이트를 재생성하는 것을 확인하도록 준비했습니다. 배포 사전에 있는 문구가 영어로 나오면 구버전 실행, 중복 설치, DOM 탐지, 코치 식별을 먼저 확인합니다. “Can you find a way to win my queen?”는 이미 두 코치 사전에 있습니다.
+현재 소스는 공개 v1.3.12 사용자 스크립트와 동일한 바이트를 재생성하는 것을 확인하도록 준비했습니다. 배포 사전에 있는 문구가 영어로 나오면 구버전 실행, 중복 설치, DOM 탐지, 코치 식별을 먼저 확인합니다. “Can you find a way to win my queen?”는 이미 두 코치 사전에 있습니다.
 
 이 파일은 개발 PC 전체 백업이 아닙니다. 원시 대규모 수집 자료, 로컬 모델, 기계번역 작업 DB, 개인 오류 로그와 자격 증명은 제외했습니다. 기존 두 코치 사전 수정, 빌드, 검수 배치 재생성, 테스트에는 포함된 소스를 사용합니다.
 
-## 문장 조각과 로딩 문구 (v1.3.11)
+## 문장 조각과 로딩 문구 (v1.3.12)
 
 fragment-assets.json에는 두 코치의 공개 원문에서 추린 조합용 키만 들어 있습니다. fragment-families-source.json과 fragment-families-ko.txt는 312개 행동 유형의 원문과 한국어입니다. 기물은 순서가 있는 자리표시자로 구분합니다. build-fragments.cjs가 조각 사전을 생성하며 build-userscript.cjs에서 자동 실행됩니다. 앞부분 44종과 코치별 행동 조각을 정확하게 연결하고, 검수된 여러 문장과도 합칩니다. 모르는 나머지는 숨기지 않습니다.
 
 loading-phrases-source.json과 loading-phrases-ko.txt는 별도 리뷰 로딩 목록 58개입니다. reviewed-loading-overrides.json이 배포 사전에 들어갑니다. 원문에 있는 역사·통계 주장의 사실 검증을 의미하지는 않습니다. 새 조합 검사는 npm run build에 포함됩니다.
 
 
-v1.3.11는 /daily 및 날짜별 일일 퍼즐 경로를 지원합니다. 실제 DOM으로 번역·기존 한국어·댓글 보존을 검사하는 test-daily.cjs가 빌드 검사에 포함됩니다. 일일 퍼즐의 확인된 solved 상태를 오류 기록에 보존합니다.
+v1.3.12는 /daily 및 날짜별 일일 퍼즐 경로를 지원합니다. 실제 DOM으로 번역·기존 한국어·댓글 보존을 검사하는 test-daily.cjs가 빌드 검사에 포함됩니다. 일일 퍼즐의 확인된 solved 상태를 오류 기록에 보존합니다.
 
 
-v1.3.11: test-nov26.cjs checks 230 reported/context/mixed-locale texts for both coaches.
+v1.3.12: test-nov26.cjs checks 230 reported/context/mixed-locale texts for both coaches.
 
 
-v1.3.11: reviewed-origin-overrides.json covers all 31 shared loading messages and 19 observed coach asset changes. origin-sources.json preserves the exact source keys. test-origin.cjs checks exact translations, reviewed status, source preservation and mixed-language composition.
+v1.3.12: reviewed-origin-overrides.json covers all 31 shared loading messages and 19 observed coach asset changes. origin-sources.json preserves the exact source keys. test-origin.cjs checks exact translations, reviewed status, source preservation and mixed-language composition.
+
+
+v1.3.12: 퍼즐 시작 안내 7개 추가. test-puzzle-lobby.cjs에서 줄바꿈, 말풍선 교체, 두 코치 및 외부 텍스트 보존을 확인합니다.
